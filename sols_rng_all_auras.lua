@@ -1,0 +1,186 @@
+--[[
+  Sol's RNG (live Roblox client) helper script.
+  This runs in a Roblox executor, not in Roblox Studio.
+
+  Important:
+  - Getting literally "all auras" is server-side and cannot be forced reliably from client code.
+  - This script does the next best things:
+      1) Continuously tries to trigger roll/spin remotes.
+      2) Collects every aura name it can discover from replicated data and your visible inventory.
+      3) Prints and copies the discovered aura list to clipboard.
+
+  Paste this into your executor while in Sol's RNG.
+]]
+
+if not game or not game:GetService then
+    error("Run this inside a Roblox game client.")
+end
+
+local Players = game:GetService("Players")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local Workspace = game:GetService("Workspace")
+
+local LocalPlayer = Players.LocalPlayer
+if not LocalPlayer then
+    error("LocalPlayer not found.")
+end
+
+local discovered = {}
+local rolling = true
+
+local function addAura(name)
+    if typeof(name) ~= "string" then
+        return
+    end
+    name = name:match("^%s*(.-)%s*$")
+    if name == "" then
+        return
+    end
+    if not discovered[name] then
+        discovered[name] = true
+        print("[Aura Found]", name)
+    end
+end
+
+local auraNameHints = {
+    "aura", "auras", "inventory", "inv", "owned", "collection", "roll", "spin"
+}
+
+local function looksInteresting(inst)
+    local n = string.lower(inst.Name)
+    for _, hint in ipairs(auraNameHints) do
+        if string.find(n, hint, 1, true) then
+            return true
+        end
+    end
+    return false
+end
+
+local function scanInstanceTree(root)
+    for _, inst in ipairs(root:GetDescendants()) do
+        if inst:IsA("StringValue") then
+            addAura(inst.Value)
+            if looksInteresting(inst) then
+                addAura(inst.Name)
+            end
+        elseif inst:IsA("Folder") or inst:IsA("Configuration") then
+            if looksInteresting(inst) then
+                addAura(inst.Name)
+                for _, child in ipairs(inst:GetChildren()) do
+                    if child:IsA("StringValue") then
+                        addAura(child.Value)
+                    else
+                        addAura(child.Name)
+                    end
+                end
+            end
+        elseif inst:IsA("TextLabel") then
+            if looksInteresting(inst) then
+                addAura(inst.Text)
+            end
+        end
+    end
+end
+
+local function getRollRemotes()
+    local found = {}
+    for _, inst in ipairs(ReplicatedStorage:GetDescendants()) do
+        if inst:IsA("RemoteEvent") or inst:IsA("RemoteFunction") then
+            local n = string.lower(inst.Name)
+            if string.find(n, "roll", 1, true)
+                or string.find(n, "spin", 1, true)
+                or string.find(n, "summon", 1, true) then
+                table.insert(found, inst)
+            end
+        end
+    end
+    return found
+end
+
+local function tryRoll(rem)
+    local ok = false
+    if rem:IsA("RemoteEvent") then
+        ok = pcall(function()
+            rem:FireServer()
+        end)
+    elseif rem:IsA("RemoteFunction") then
+        ok = pcall(function()
+            rem:InvokeServer()
+        end)
+    end
+    return ok
+end
+
+local function sortedAuraList()
+    local out = {}
+    for auraName in pairs(discovered) do
+        table.insert(out, auraName)
+    end
+    table.sort(out)
+    return out
+end
+
+local function printAndCopy()
+    local list = sortedAuraList()
+    local text = table.concat(list, "\n")
+    print("\n===== DISCOVERED AURAS (" .. tostring(#list) .. ") =====")
+    print(text)
+    print("===========================================\n")
+
+    if setclipboard then
+        pcall(function()
+            setclipboard(text)
+            print("[Info] Aura list copied to clipboard.")
+        end)
+    end
+end
+
+-- Initial discovery scan
+scanInstanceTree(ReplicatedStorage)
+scanInstanceTree(LocalPlayer)
+scanInstanceTree(Workspace)
+
+-- Keep scanning for new strings/labels/folders that may include aura names.
+task.spawn(function()
+    while rolling do
+        pcall(function()
+            scanInstanceTree(ReplicatedStorage)
+            scanInstanceTree(LocalPlayer)
+        end)
+        task.wait(2)
+    end
+end)
+
+-- Auto-roll loop (best effort; depends on game anti-cheat/server checks).
+task.spawn(function()
+    while rolling do
+        local remotes = getRollRemotes()
+        if #remotes == 0 then
+            task.wait(1)
+        else
+            for _, rem in ipairs(remotes) do
+                tryRoll(rem)
+                task.wait(0.15)
+            end
+        end
+        task.wait(0.35)
+    end
+end)
+
+-- Periodic output
+print("[Sol's RNG helper] Running. Collecting aura names + trying roll remotes...")
+print("[Sol's RNG helper] Use _G.StopSolsAuraScript() to stop and print final list.")
+
+_G.StopSolsAuraScript = function()
+    rolling = false
+    task.wait(0.5)
+    printAndCopy()
+end
+
+-- Also print snapshots every 30 seconds so you don't lose progress.
+task.spawn(function()
+    while rolling do
+        task.wait(30)
+        printAndCopy()
+    end
+end)
